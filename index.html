@@ -34,8 +34,8 @@
   .btn:active{transform:scale(0.94);}
   .btn:disabled{opacity:0.35;pointer-events:none;}
 
-  /* TOOLBAR */
-  .toolbar{padding:6px 10px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-wrap:wrap;}
+  /* TOOLBAR — sticky under header */
+  .toolbar{padding:6px 10px;display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border);flex-wrap:wrap;position:sticky;top:54px;z-index:90;background:var(--bg);}
   .toolbar-left{display:flex;gap:6px;align-items:center;flex:1;}
   .toolbar-right{display:flex;gap:6px;align-items:center;}
   .mode-toggle{display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:18px;padding:2px;gap:2px;}
@@ -47,7 +47,7 @@
   .photo-count-label strong{color:var(--accent);}
 
   /* SELECT MODE banner */
-  .select-banner{padding:8px 12px;background:rgba(255,107,53,0.12);border-bottom:1px solid rgba(255,107,53,0.3);display:none;align-items:center;justify-content:space-between;font-size:12px;color:var(--accent);font-weight:600;}
+  .select-banner{padding:8px 12px;background:rgba(255,107,53,0.12);border-bottom:1px solid rgba(255,107,53,0.3);display:none;align-items:center;justify-content:space-between;font-size:12px;color:var(--accent);font-weight:600;position:sticky;top:122px;z-index:88;}
   .select-banner.active{display:flex;}
   .select-banner button{background:var(--accent);color:#000;border:none;border-radius:12px;padding:5px 12px;font-size:11px;font-weight:700;cursor:pointer;}
 
@@ -59,8 +59,13 @@
   .btn-upload-big{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#000;font-family:'DM Sans',sans-serif;font-size:15px;font-weight:700;padding:14px 28px;border-radius:50px;border:none;cursor:pointer;transition:transform 0.15s;}
   .btn-upload-big:active{transform:scale(0.96);}
 
-  /* GRID 4:5 — Instagram order: #1 bottom-right */
-  #grid-container{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--gap);padding:var(--gap);transform:rotate(180deg);}
+  /* ZOOM wrapper */
+  #grid-wrapper{display:flex;justify-content:center;background:var(--bg);}
+  #grid-container{display:grid;grid-template-columns:repeat(3,1fr);gap:var(--gap);padding:var(--gap);transform:rotate(180deg);width:100%;max-width:480px;transition:max-width 0.2s;}
+  /* Zoom bar */
+  .zoom-bar{padding:4px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);font-size:11px;color:var(--muted);position:sticky;top:94px;z-index:89;background:var(--bg);}
+  .zoom-bar input[type=range]{flex:1;accent-color:var(--accent);height:3px;}
+  .zoom-label{min-width:32px;text-align:right;color:var(--accent);font-weight:600;}
   .grid-cell{position:relative;aspect-ratio:4/5;overflow:hidden;background:var(--surface2);cursor:grab;user-select:none;-webkit-user-select:none;transform:rotate(180deg);transition:outline 0.1s;}
   .grid-cell img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none;}
   .grid-cell.dragging{opacity:0.15;transform:rotate(180deg) scale(0.92);}
@@ -167,6 +172,13 @@
   </div>
 </div>
 
+<!-- Zoom bar -->
+<div class="zoom-bar" id="zoom-bar" style="display:none">
+  🔍
+  <input type="range" id="zoom-slider" min="240" max="600" value="480" step="10" oninput="applyZoom(this.value)">
+  <span class="zoom-label" id="zoom-label">100%</span>
+</div>
+
 <!-- Multi-select banner -->
 <div class="select-banner" id="select-banner">
   <span id="select-label">0 selezionate</span>
@@ -180,7 +192,7 @@
   <button class="btn-upload-big" onclick="document.getElementById('file-input').click()">📂 Carica Foto</button>
 </div>
 
-<div id="grid-container"></div>
+<div id="grid-wrapper"><div id="grid-container"></div></div>
 <div class="bottom-spacer"></div>
 
 <div class="bottom-bar" id="bottom-bar" style="display:none">
@@ -405,8 +417,28 @@ document.getElementById('file-refresh').addEventListener('change', async e => {
   setCloud('ok', 'sincronizzato');
 });
 
-// ---- UPLOAD via Netlify proxy ----
+// ---- UPLOAD via Netlify proxy (with retry) ----
 async function uploadFile(file, id) {
+  const MAX_RETRIES = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await _doUpload(file, id, attempt, MAX_RETRIES);
+    } catch(e) {
+      lastErr = e;
+      if (attempt < MAX_RETRIES) {
+        const lbl = document.querySelector(`[data-id="${id}"] .prog-label`);
+        if (lbl) lbl.textContent = `Riprovo (${attempt}/${MAX_RETRIES})…`;
+        const bar = document.querySelector(`[data-id="${id}"] .prog-bar`);
+        if (bar) bar.style.width = '0%';
+        await new Promise(r => setTimeout(r, 1500 * attempt));
+      }
+    }
+  }
+  throw lastErr;
+}
+
+async function _doUpload(file, id, attempt, total) {
   const fd = new FormData();
   fd.append('file', file);
   fd.append('upload_preset', CLOUDINARY_PRESET);
@@ -418,11 +450,18 @@ async function uploadFile(file, id) {
     const bar = document.querySelector(`[data-id="${id}"] .prog-bar`);
     if (bar) bar.style.width = pct + '%';
     const lbl = document.querySelector(`[data-id="${id}"] .prog-label`);
-    if (lbl) lbl.textContent = pct + '%';
+    if (lbl) lbl.textContent = total > 1 ? `Tentativo ${attempt}… ${pct}%` : pct + '%';
   }, 250);
 
+  // Timeout: 3 minutes per attempt
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 180000);
+
   try {
-    const res = await fetch(UPLOAD_URL, { method: 'POST', body: fd });
+    const res = await fetch(UPLOAD_URL, {
+      method: 'POST', body: fd, signal: controller.signal
+    });
+    clearTimeout(timeout);
     clearInterval(interval);
     if (!res.ok) {
       const txt = await res.text();
@@ -437,6 +476,7 @@ async function uploadFile(file, id) {
     const thumbUrl = data.secure_url.replace('/upload/', '/upload/w_400,c_fill,ar_4:5/');
     return { url: data.secure_url, publicId: data.public_id, thumbUrl };
   } catch(e) {
+    clearTimeout(timeout);
     clearInterval(interval);
     throw e;
   }
@@ -479,6 +519,7 @@ function renderGrid() {
   document.getElementById('empty-state').style.display = n ? 'none' : 'flex';
   document.getElementById('bottom-bar').style.display  = n ? 'flex' : 'none';
   document.getElementById('toolbar').style.display     = n ? 'flex' : 'none';
+  document.getElementById('zoom-bar').style.display    = n ? 'flex' : 'none';
   document.getElementById('photo-count').textContent   = n;
 
   photos.forEach((photo, idx) => {
@@ -540,20 +581,25 @@ function renderGrid() {
 // ---- SELECT MODE (feature 1) ----
 window.toggleEdit = () => {
   if (selectMode) {
-    // Exit select mode
-    selectMode = false;
+    // selectMode → off
+    selectMode = false; editMode = false;
     selectedIdxs.clear();
     document.getElementById('select-banner').classList.remove('active');
     document.getElementById('edit-btn').textContent = '✏️';
+    document.getElementById('edit-btn').title = 'Elimina foto';
+    showToast('Modalità disattivata');
   } else if (editMode) {
-    editMode = false;
-    document.getElementById('edit-btn').textContent = '✏️';
+    // editMode → selectMode
+    editMode = false; selectMode = true;
+    document.getElementById('edit-btn').textContent = '☑️';
+    document.getElementById('edit-btn').title = 'Esci selezione';
+    showToast('Tocca una riga per selezionarla, poi trascina');
   } else {
-    // Enter select mode
-    selectMode = true;
-    editMode = false;
+    // off → editMode (X rossa)
+    editMode = true; selectMode = false;
     document.getElementById('edit-btn').textContent = '✅';
-    showToast('Tocca una riga per selezionarla, poi tieni premuto e trascina');
+    document.getElementById('edit-btn').title = 'Passa a selezione righe';
+    showToast('Tocca × per eliminare una foto');
   }
   renderGrid();
 };
@@ -602,8 +648,9 @@ function onDragOver(e) { e.preventDefault(); this.classList.add('drag-over'); }
 function onDragLeave() { this.classList.remove('drag-over'); }
 function onDrop(e) {
   e.preventDefault();
-  const ti = +this.dataset.idx;
   this.classList.remove('drag-over');
+  // Use the cell we dropped ON directly (this = target cell)
+  const ti = +this.dataset.idx;
   if (dragSrcIdxs.length && !dragSrcIdxs.includes(ti)) {
     movePhotos(dragSrcIdxs, ti);
   }
@@ -677,10 +724,10 @@ function onTouchMove(e) {
   const sb = document.getElementById('scroll-bottom');
   if (vy < ZONE) {
     st.classList.add('active'); sb.classList.remove('active');
-    scrollInterval = setInterval(() => window.scrollBy(0, -8), 16);
+    scrollInterval = setInterval(() => window.scrollBy(0, -22), 12);
   } else if (vy > wh - ZONE - 60) {
     sb.classList.add('active'); st.classList.remove('active');
-    scrollInterval = setInterval(() => window.scrollBy(0, 8), 16);
+    scrollInterval = setInterval(() => window.scrollBy(0, 22), 12);
   } else {
     st.classList.remove('active'); sb.classList.remove('active');
   }
@@ -700,12 +747,22 @@ function onTouchEnd(e) {
     touchDragSrcIdxs = [];
     return;
   }
-  // Get target BEFORE removing clone
   const t = e.changedTouches[0];
-  touchClone.style.visibility = 'hidden'; // hide but keep in DOM temporarily
-  const el = document.elementFromPoint(t.clientX, t.clientY);
-  killClone(); // now fully remove
-  const tc = el?.closest('.grid-cell');
+  const cx = t.clientX, cy = t.clientY;
+
+  // Hide clone so it doesn't block elementFromPoint
+  touchClone.style.visibility = 'hidden';
+
+  // Try primary point, then search nearby offsets if missed
+  let tc = null;
+  const offsets = [[0,0],[0,-20],[0,20],[-20,0],[20,0],[-30,-30],[30,-30],[-30,30],[30,30]];
+  for (const [dx, dy] of offsets) {
+    const el = document.elementFromPoint(cx + dx, cy + dy);
+    tc = el?.closest('.grid-cell');
+    if (tc) break;
+  }
+
+  killClone();
   const ti = tc ? +tc.dataset.idx : null;
   const srcs = touchDragSrcIdxs.slice();
   touchDragSrcIdxs = [];
@@ -722,9 +779,10 @@ async function movePhotos(srcIdxs, targetIdx) {
     const a = srcIdxs[0];
     if (moveMode === 'insert') {
       const [moved] = photos.splice(a, 1);
-      const newTarget = a < targetIdx ? targetIdx - 1 : targetIdx;
-      photos.splice(newTarget, 0, moved);
-      showToast(`↪ Foto spostata in posizione ${newTarget+1}`);
+      // After splice, if a < targetIdx the target index shifted by -1
+      const insertAt = a < targetIdx ? targetIdx - 1 : targetIdx;
+      photos.splice(insertAt, 0, moved);
+      showToast(`↪ Posizione ${insertAt+1}`);
     } else {
       [photos[a], photos[targetIdx]] = [photos[targetIdx], photos[a]];
       showToast(`⇄ ${a+1} ↔ ${targetIdx+1}`);
@@ -746,6 +804,14 @@ async function movePhotos(srcIdxs, targetIdx) {
   renderGrid();
   await saveOrder();
 }
+
+// ---- ZOOM ----
+window.applyZoom = (val) => {
+  const maxW = parseInt(val);
+  document.getElementById('grid-container').style.maxWidth = maxW + 'px';
+  const pct = Math.round((maxW / 480) * 100);
+  document.getElementById('zoom-label').textContent = pct + '%';
+};
 
 // ---- SET MODE ----
 window.setMode = mode => {
